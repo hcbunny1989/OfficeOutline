@@ -1,0 +1,5 @@
+core/
+office-outline
+src/*.o
+.DS_Store
+*.tmp
