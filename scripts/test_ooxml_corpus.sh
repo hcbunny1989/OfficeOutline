@@ -40,3 +40,10 @@ done
 
 grep -q '<chart ' "$EXAMPLES_DIR/profile_results_8400.md"
 grep -q '<chart ' "$EXAMPLES_DIR/Result.md"
+grep -q 'chartType=' "$EXAMPLES_DIR/Result.md"
+grep -q '<chart_series ' "$EXAMPLES_DIR/Result.md"
+grep -q 'mergedRef=' "$EXAMPLES_DIR/Result.md"
+grep -q 'rowspan=' "$EXAMPLES_DIR/Result.md"
+grep -q 'colspan=' "$EXAMPLES_DIR/Result.md"
+grep -q 'alignment=' "$EXAMPLES_DIR/Computing Contingency Tables from Sparse ADtrees_slides.md"
+grep -q 'marginLeft=' "$EXAMPLES_DIR/Computing Contingency Tables from Sparse ADtrees_slides.md"

@@ -1,6 +1,7 @@
 #include "xml.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -141,6 +142,93 @@ std::string hundredPointsToPt(const std::string& value)
     }
 }
 
+std::string twipsToPt(const std::string& value)
+{
+    if (value.empty()) {
+        return {};
+    }
+    try {
+        return formatNumber(std::stod(value) / 20.0);
+    } catch (...) {
+        return value;
+    }
+}
+
+std::string emuToPt(const std::string& value)
+{
+    if (value.empty()) {
+        return {};
+    }
+    try {
+        return formatNumber(std::stod(value) / 12700.0);
+    } catch (...) {
+        return value;
+    }
+}
+
+std::string normalizeWordAlignment(const std::string& value)
+{
+    std::string v = lower(value);
+    if (v == "start") {
+        return "left";
+    }
+    if (v == "end") {
+        return "right";
+    }
+    if (v == "both") {
+        return "justify";
+    }
+    return value;
+}
+
+std::string normalizeDrawingAlignment(const std::string& value)
+{
+    std::string v = lower(value);
+    if (v == "l") {
+        return "left";
+    }
+    if (v == "ctr") {
+        return "center";
+    }
+    if (v == "r") {
+        return "right";
+    }
+    if (v == "just" || v == "dist") {
+        return "justify";
+    }
+    return value;
+}
+
+std::string contentTypeForPath(const std::string& target)
+{
+    std::string ext = lower(fs::path(target).extension().string());
+    if (ext == ".png") {
+        return "image/png";
+    }
+    if (ext == ".jpg" || ext == ".jpeg") {
+        return "image/jpeg";
+    }
+    if (ext == ".gif") {
+        return "image/gif";
+    }
+    if (ext == ".bmp") {
+        return "image/bmp";
+    }
+    if (ext == ".tif" || ext == ".tiff") {
+        return "image/tiff";
+    }
+    if (ext == ".emf") {
+        return "image/x-emf";
+    }
+    if (ext == ".wmf") {
+        return "image/x-wmf";
+    }
+    if (ext == ".svg") {
+        return "image/svg+xml";
+    }
+    return {};
+}
+
 struct TextFormat {
     std::string fontName;
     std::string fontSize;
@@ -148,6 +236,32 @@ struct TextFormat {
     std::optional<bool> bold;
     std::optional<bool> italic;
     std::string underline;
+};
+
+struct ParagraphInfo {
+    std::string alignment;
+    std::string indentLeft;
+    std::string indentRight;
+    std::string indentFirstLine;
+    std::string indentHanging;
+    std::string marginLeft;
+    std::string marginRight;
+    std::string indent;
+    std::string listId;
+    std::string listLevel;
+    std::string listType;
+    std::string listFormat;
+    std::string listText;
+    std::string bulletChar;
+    std::string numberingType;
+    std::string numberingStart;
+};
+
+struct CellFormat {
+    TextFormat text;
+    std::string alignment;
+    std::string verticalAlignment;
+    std::string indent;
 };
 
 TextFormat mergeFormat(TextFormat base, const TextFormat& overlay)
@@ -193,6 +307,26 @@ void addFormatAttrs(Attrs& attrs, const TextFormat& format)
     attrs.emplace_back("bold", format.bold.value_or(false) ? "true" : "false");
     attrs.emplace_back("italic", format.italic.value_or(false) ? "true" : "false");
     attrs.emplace_back("underline", format.underline.empty() ? "none" : format.underline);
+}
+
+void addParagraphAttrs(Attrs& attrs, const ParagraphInfo& paragraph)
+{
+    addAttr(attrs, "alignment", paragraph.alignment);
+    addAttr(attrs, "indentLeft", paragraph.indentLeft);
+    addAttr(attrs, "indentRight", paragraph.indentRight);
+    addAttr(attrs, "indentFirstLine", paragraph.indentFirstLine);
+    addAttr(attrs, "indentHanging", paragraph.indentHanging);
+    addAttr(attrs, "marginLeft", paragraph.marginLeft);
+    addAttr(attrs, "marginRight", paragraph.marginRight);
+    addAttr(attrs, "indent", paragraph.indent);
+    addAttr(attrs, "listId", paragraph.listId);
+    addAttr(attrs, "listLevel", paragraph.listLevel);
+    addAttr(attrs, "listType", paragraph.listType);
+    addAttr(attrs, "listFormat", paragraph.listFormat);
+    addAttr(attrs, "listText", paragraph.listText);
+    addAttr(attrs, "bulletChar", paragraph.bulletChar);
+    addAttr(attrs, "numberingType", paragraph.numberingType);
+    addAttr(attrs, "numberingStart", paragraph.numberingStart);
 }
 
 std::string childText(const XmlNode& node, std::string_view childName)
@@ -389,6 +523,54 @@ std::string relationshipTarget(const RelationshipMap& rels, const std::string& i
         return it->second.target;
     }
     return resolvePartTarget(sourcePart, it->second.target);
+}
+
+bool isExternalTarget(const std::string& target)
+{
+    return target.rfind("http://", 0) == 0 || target.rfind("https://", 0) == 0 || target.rfind("mailto:", 0) == 0;
+}
+
+void addEmbeddedObjectAttrs(Attrs& attrs, const Package& package, const std::string& target)
+{
+    addAttr(attrs, "contentType", contentTypeForPath(target));
+    if (target.empty() || isExternalTarget(target) || !package.exists(target)) {
+        return;
+    }
+
+    std::string data = package.readEntry(target);
+    attrs.emplace_back("dataAvailable", "true");
+    attrs.emplace_back("sizeBytes", std::to_string(data.size()));
+}
+
+bool addNonVisualAttrs(Attrs& attrs, const XmlNode& node)
+{
+    for (const XmlNode* current = &node; current; current = current->parent) {
+        std::vector<const XmlNode*> candidates;
+        std::string currentName = localName(current->name);
+        if (currentName == "docPr" || currentName == "cNvPr") {
+            candidates.push_back(current);
+        }
+        std::vector<const XmlNode*> docPr = descendantsLocal(*current, "docPr");
+        candidates.insert(candidates.end(), docPr.begin(), docPr.end());
+        std::vector<const XmlNode*> cNvPr = descendantsLocal(*current, "cNvPr");
+        candidates.insert(candidates.end(), cNvPr.begin(), cNvPr.end());
+
+        for (const XmlNode* candidate : candidates) {
+            std::string objectId = attrLocal(*candidate, "id");
+            std::string name = attrLocal(*candidate, "name");
+            std::string description = attrLocal(*candidate, "descr");
+            std::string title = attrLocal(*candidate, "title");
+            if (objectId.empty() && name.empty() && description.empty() && title.empty()) {
+                continue;
+            }
+            addAttr(attrs, "objectId", objectId);
+            addAttr(attrs, "objectName", name);
+            addAttr(attrs, "description", description);
+            addAttr(attrs, "title", title);
+            return true;
+        }
+    }
+    return false;
 }
 
 const XmlNode* documentElement(const XmlNode& doc)
@@ -588,10 +770,84 @@ private:
     std::string defaultCharacterStyle_;
 };
 
+class NumberingSet {
+public:
+    struct Level {
+        std::string format;
+        std::string text;
+    };
+
+    void load(const Package& package)
+    {
+        if (!package.exists("word/numbering.xml")) {
+            return;
+        }
+
+        XmlParser parser;
+        auto doc = parser.parse(package.readEntry("word/numbering.xml"));
+        const XmlNode* root = documentElement(*doc);
+        if (!root) {
+            return;
+        }
+
+        for (const XmlNode* abstractNum : childrenLocal(*root, "abstractNum")) {
+            std::string abstractId = attrLocal(*abstractNum, "abstractNumId");
+            if (abstractId.empty()) {
+                continue;
+            }
+            for (const XmlNode* lvl : childrenLocal(*abstractNum, "lvl")) {
+                std::string ilvl = attrLocal(*lvl, "ilvl");
+                if (ilvl.empty()) {
+                    ilvl = "0";
+                }
+                Level level;
+                if (const XmlNode* numFmt = firstChildLocal(*lvl, "numFmt")) {
+                    level.format = attrLocal(*numFmt, "val");
+                }
+                if (const XmlNode* lvlText = firstChildLocal(*lvl, "lvlText")) {
+                    level.text = attrLocal(*lvlText, "val");
+                }
+                abstractLevels_[abstractId][ilvl] = std::move(level);
+            }
+        }
+
+        for (const XmlNode* num : childrenLocal(*root, "num")) {
+            std::string numId = attrLocal(*num, "numId");
+            const XmlNode* abstractNumId = firstChildLocal(*num, "abstractNumId");
+            if (!numId.empty() && abstractNumId) {
+                numToAbstract_[numId] = attrLocal(*abstractNumId, "val");
+            }
+        }
+    }
+
+    Level level(const std::string& numId, const std::string& ilvl) const
+    {
+        auto numIt = numToAbstract_.find(numId);
+        if (numIt == numToAbstract_.end()) {
+            return {};
+        }
+        auto abstractIt = abstractLevels_.find(numIt->second);
+        if (abstractIt == abstractLevels_.end()) {
+            return {};
+        }
+        std::string levelId = ilvl.empty() ? "0" : ilvl;
+        auto levelIt = abstractIt->second.find(levelId);
+        if (levelIt == abstractIt->second.end()) {
+            return {};
+        }
+        return levelIt->second;
+    }
+
+private:
+    std::map<std::string, std::map<std::string, Level>> abstractLevels_;
+    std::map<std::string, std::string> numToAbstract_;
+};
+
 struct DocxContext {
     const Package& package;
     MarkdownWriter& md;
     StyleSet styles;
+    NumberingSet numbering;
 };
 
 Attrs formattedAttrs(std::string tag, const TextFormat& format)
@@ -601,8 +857,18 @@ Attrs formattedAttrs(std::string tag, const TextFormat& format)
     return attrs;
 }
 
+Attrs formattedCellAttrs(std::string tag, const CellFormat& format)
+{
+    Attrs attrs = formattedAttrs(std::move(tag), format.text);
+    addAttr(attrs, "alignment", format.alignment);
+    addAttr(attrs, "verticalAlignment", format.verticalAlignment);
+    addAttr(attrs, "indent", format.indent);
+    return attrs;
+}
+
 void emitWordContent(const XmlNode& node, const RelationshipMap& rels, const std::string& part, DocxContext& ctx, const TextFormat& baseFormat);
 void emitWordInline(const XmlNode& node, const RelationshipMap& rels, const std::string& part, DocxContext& ctx, const TextFormat& currentFormat);
+void emitChartRef(const Package& package, const XmlNode& chart, MarkdownWriter& md, const RelationshipMap& rels, const std::string& part);
 
 TextFormat paragraphFormat(const XmlNode& paragraph, const StyleSet& styles, std::string& styleId)
 {
@@ -631,6 +897,75 @@ TextFormat runFormat(const XmlNode& run, const StyleSet& styles, const TextForma
     return format;
 }
 
+ParagraphInfo wordParagraphInfo(const XmlNode& paragraph, const NumberingSet& numbering)
+{
+    ParagraphInfo info;
+    const XmlNode* pPr = firstChildLocal(paragraph, "pPr");
+    if (!pPr) {
+        return info;
+    }
+
+    if (const XmlNode* jc = firstChildLocal(*pPr, "jc")) {
+        info.alignment = normalizeWordAlignment(attrLocal(*jc, "val"));
+    }
+    if (const XmlNode* ind = firstChildLocal(*pPr, "ind")) {
+        std::string left = attrLocal(*ind, "left");
+        if (left.empty()) {
+            left = attrLocal(*ind, "start");
+        }
+        std::string right = attrLocal(*ind, "right");
+        if (right.empty()) {
+            right = attrLocal(*ind, "end");
+        }
+        info.indentLeft = twipsToPt(left);
+        info.indentRight = twipsToPt(right);
+        info.indentFirstLine = twipsToPt(attrLocal(*ind, "firstLine"));
+        info.indentHanging = twipsToPt(attrLocal(*ind, "hanging"));
+    }
+    if (const XmlNode* numPr = firstChildLocal(*pPr, "numPr")) {
+        if (const XmlNode* ilvl = firstChildLocal(*numPr, "ilvl")) {
+            info.listLevel = attrLocal(*ilvl, "val");
+        }
+        if (const XmlNode* numId = firstChildLocal(*numPr, "numId")) {
+            info.listId = attrLocal(*numId, "val");
+        }
+        NumberingSet::Level level = numbering.level(info.listId, info.listLevel);
+        info.listFormat = level.format;
+        info.listText = level.text;
+        if (!info.listId.empty()) {
+            info.listType = lower(level.format) == "bullet" ? "bullet" : "numbered";
+        }
+    }
+    return info;
+}
+
+ParagraphInfo drawingParagraphInfo(const XmlNode& paragraph)
+{
+    ParagraphInfo info;
+    const XmlNode* pPr = firstChildLocal(paragraph, "pPr");
+    if (!pPr) {
+        return info;
+    }
+
+    info.alignment = normalizeDrawingAlignment(attrLocal(*pPr, "algn"));
+    info.listLevel = attrLocal(*pPr, "lvl");
+    info.marginLeft = emuToPt(attrLocal(*pPr, "marL"));
+    info.marginRight = emuToPt(attrLocal(*pPr, "marR"));
+    info.indent = emuToPt(attrLocal(*pPr, "indent"));
+
+    if (const XmlNode* bullet = firstChildLocal(*pPr, "buChar")) {
+        info.listType = "bullet";
+        info.bulletChar = attrLocal(*bullet, "char");
+    } else if (const XmlNode* autoNum = firstChildLocal(*pPr, "buAutoNum")) {
+        info.listType = "numbered";
+        info.numberingType = attrLocal(*autoNum, "type");
+        info.numberingStart = attrLocal(*autoNum, "startAt");
+    } else if (firstChildLocal(*pPr, "buNone")) {
+        info.listType = "none";
+    }
+    return info;
+}
+
 void emitFormula(MarkdownWriter& md, const XmlNode& node)
 {
     Attrs attrs = tagAttrs("formula");
@@ -647,6 +982,68 @@ void emitPlainText(MarkdownWriter& md, const TextFormat& format, std::string_vie
     md.text("plain_text", attrs, text);
 }
 
+std::string revisionType(const std::string& name)
+{
+    if (name == "ins") {
+        return "insert";
+    }
+    if (name == "del") {
+        return "delete";
+    }
+    if (name == "moveFrom") {
+        return "moveFrom";
+    }
+    if (name == "moveTo") {
+        return "moveTo";
+    }
+    return name;
+}
+
+void addRevisionAttrs(Attrs& attrs, const XmlNode& node)
+{
+    addAttr(attrs, "id", attrLocal(node, "id"));
+    addAttr(attrs, "author", attrLocal(node, "author"));
+    addAttr(attrs, "date", attrLocal(node, "date"));
+}
+
+void emitBookmark(MarkdownWriter& md, const XmlNode& node)
+{
+    std::string name = localName(node.name);
+    Attrs attrs = tagAttrs("bookmark");
+    addAttr(attrs, "action", name == "bookmarkEnd" ? "end" : "start");
+    addAttr(attrs, "id", attrLocal(node, "id"));
+    addAttr(attrs, "name", attrLocal(node, "name"));
+    addAttr(attrs, "columnFirst", attrLocal(node, "colFirst"));
+    addAttr(attrs, "columnLast", attrLocal(node, "colLast"));
+    md.empty("bookmark", attrs);
+}
+
+void emitGenericBookmarks(const XmlNode& root, MarkdownWriter& md)
+{
+    for (std::string name : {"bookmark", "bmk"}) {
+        for (const XmlNode* bookmark : descendantsLocal(root, name)) {
+            Attrs attrs = tagAttrs("bookmark");
+            addAttr(attrs, "sourceElement", bookmark->name);
+            addAttr(attrs, "id", attrLocal(*bookmark, "id"));
+            addAttr(attrs, "name", attrLocal(*bookmark, "name"));
+            addAttr(attrs, "target", attrLocal(*bookmark, "target"));
+            md.empty("bookmark", attrs);
+        }
+    }
+}
+
+void emitRevision(const XmlNode& revision, const RelationshipMap& rels, const std::string& part, DocxContext& ctx, const TextFormat& format)
+{
+    Attrs attrs = tagAttrs("revision");
+    addAttr(attrs, "type", revisionType(localName(revision.name)));
+    addRevisionAttrs(attrs, revision);
+    ctx.md.open("revision", attrs);
+    for (const auto& child : revision.children) {
+        emitWordInline(*child, rels, part, ctx, format);
+    }
+    ctx.md.close("revision");
+}
+
 void emitDocxDrawing(const XmlNode& drawing, const RelationshipMap& rels, const std::string& part, DocxContext& ctx, const TextFormat& format)
 {
     Attrs attrs = tagAttrs("drawing_object");
@@ -660,14 +1057,20 @@ void emitDocxDrawing(const XmlNode& drawing, const RelationshipMap& rels, const 
         }
         Attrs imageAttrs = tagAttrs("image");
         addAttr(imageAttrs, "relationshipId", id);
-        addAttr(imageAttrs, "target", relationshipTarget(rels, id, part));
+        std::string target = relationshipTarget(rels, id, part);
+        addAttr(imageAttrs, "target", target);
+        addNonVisualAttrs(imageAttrs, *blip);
+        addEmbeddedObjectAttrs(imageAttrs, ctx.package, target);
         ctx.md.empty("image", imageAttrs);
     }
     for (const XmlNode* imageData : descendantsLocal(drawing, "imagedata")) {
         std::string id = relationshipIdAttr(*imageData);
         Attrs imageAttrs = tagAttrs("image");
         addAttr(imageAttrs, "relationshipId", id);
-        addAttr(imageAttrs, "target", relationshipTarget(rels, id, part));
+        std::string target = relationshipTarget(rels, id, part);
+        addAttr(imageAttrs, "target", target);
+        addNonVisualAttrs(imageAttrs, *imageData);
+        addEmbeddedObjectAttrs(imageAttrs, ctx.package, target);
         ctx.md.empty("image", imageAttrs);
     }
 
@@ -680,6 +1083,7 @@ void emitDocxDrawing(const XmlNode& drawing, const RelationshipMap& rels, const 
             }
             Attrs shapeAttrs = tagAttrs("shape");
             addAttr(shapeAttrs, "sourceElement", shape->name);
+            addNonVisualAttrs(shapeAttrs, *shape);
             if (const XmlNode* cNvPr = firstChildLocal(*shape, "cNvPr")) {
                 addAttr(shapeAttrs, "id", attrLocal(*cNvPr, "id"));
                 addAttr(shapeAttrs, "name", attrLocal(*cNvPr, "name"));
@@ -702,6 +1106,10 @@ void emitDocxDrawing(const XmlNode& drawing, const RelationshipMap& rels, const 
 
     for (const XmlNode* math : descendantsLocal(drawing, "oMath")) {
         emitFormula(ctx.md, *math);
+    }
+
+    for (const XmlNode* chart : descendantsLocal(drawing, "chart")) {
+        emitChartRef(ctx.package, *chart, ctx.md, rels, part);
     }
 
     ctx.md.close("drawing_object");
@@ -763,6 +1171,7 @@ void emitParagraph(const XmlNode& paragraph, const RelationshipMap& rels, const 
     Attrs attrs = formattedAttrs("paragraph", format);
     addAttr(attrs, "styleId", styleId);
     addAttr(attrs, "styleName", ctx.styles.styleName(styleId));
+    addParagraphAttrs(attrs, wordParagraphInfo(paragraph, ctx.numbering));
     ctx.md.open("paragraph", attrs);
 
     for (const auto& child : paragraph.children) {
@@ -775,27 +1184,133 @@ void emitParagraph(const XmlNode& paragraph, const RelationshipMap& rels, const 
     ctx.md.close("paragraph");
 }
 
-void emitTable(const XmlNode& table, const RelationshipMap& rels, const std::string& part, DocxContext& ctx, const TextFormat& baseFormat)
+int wordGridSpan(const XmlNode& cell)
 {
-    Attrs attrs = formattedAttrs("table", baseFormat);
-    ctx.md.open("table", attrs);
-    int rowIndex = 0;
+    const XmlNode* tcPr = firstChildLocal(cell, "tcPr");
+    if (!tcPr) {
+        return 1;
+    }
+    const XmlNode* gridSpan = firstChildLocal(*tcPr, "gridSpan");
+    if (!gridSpan) {
+        return 1;
+    }
+    try {
+        return std::max(1, std::stoi(attrLocal(*gridSpan, "val")));
+    } catch (...) {
+        return 1;
+    }
+}
+
+std::string wordVMergeState(const XmlNode& cell)
+{
+    const XmlNode* tcPr = firstChildLocal(cell, "tcPr");
+    if (!tcPr) {
+        return {};
+    }
+    const XmlNode* vMerge = firstChildLocal(*tcPr, "vMerge");
+    if (!vMerge) {
+        return {};
+    }
+    std::string value = attrLocal(*vMerge, "val");
+    if (value.empty()) {
+        return "continue";
+    }
+    return value;
+}
+
+struct WordTableCell {
+    const XmlNode* node = nullptr;
+    int column = 0;
+    int colspan = 1;
+    int rowspan = 1;
+    int mergeOriginRow = -1;
+    int mergeOriginColumn = -1;
+    std::string vMerge;
+};
+
+WordTableCell* findWordCellAtColumn(std::vector<WordTableCell>& row, int column)
+{
+    for (WordTableCell& cell : row) {
+        if (cell.column == column) {
+            return &cell;
+        }
+    }
+    return nullptr;
+}
+
+std::vector<std::vector<WordTableCell>> collectWordTableCells(const XmlNode& table)
+{
+    std::vector<std::vector<WordTableCell>> rows;
     for (const auto& rowPtr : table.children) {
         if (localName(rowPtr->name) != "tr") {
             continue;
         }
-        Attrs rowAttrs = tagAttrs("table_row");
-        addAttr(rowAttrs, "index", std::to_string(rowIndex++));
-        ctx.md.open("table_row", rowAttrs);
-        int colIndex = 0;
+        std::vector<WordTableCell> cells;
+        int column = 0;
         for (const auto& cellPtr : rowPtr->children) {
             if (localName(cellPtr->name) != "tc") {
                 continue;
             }
+            WordTableCell cell;
+            cell.node = cellPtr.get();
+            cell.column = column;
+            cell.colspan = wordGridSpan(*cell.node);
+            cell.vMerge = wordVMergeState(*cell.node);
+            cells.push_back(cell);
+            column += cell.colspan;
+        }
+        rows.push_back(std::move(cells));
+    }
+
+    for (size_t rowIndex = 0; rowIndex < rows.size(); ++rowIndex) {
+        for (WordTableCell& cell : rows[rowIndex]) {
+            if (cell.vMerge == "restart") {
+                int rowspan = 1;
+                for (size_t next = rowIndex + 1; next < rows.size(); ++next) {
+                    WordTableCell* continuation = findWordCellAtColumn(rows[next], cell.column);
+                    if (!continuation || continuation->vMerge != "continue") {
+                        break;
+                    }
+                    continuation->rowspan = 0;
+                    continuation->mergeOriginRow = static_cast<int>(rowIndex);
+                    continuation->mergeOriginColumn = cell.column;
+                    ++rowspan;
+                }
+                cell.rowspan = rowspan;
+            } else if (cell.vMerge == "continue") {
+                cell.rowspan = 0;
+            }
+        }
+    }
+
+    return rows;
+}
+
+void emitTable(const XmlNode& table, const RelationshipMap& rels, const std::string& part, DocxContext& ctx, const TextFormat& baseFormat)
+{
+    Attrs attrs = formattedAttrs("table", baseFormat);
+    ctx.md.open("table", attrs);
+    std::vector<std::vector<WordTableCell>> rows = collectWordTableCells(table);
+    for (size_t rowIndex = 0; rowIndex < rows.size(); ++rowIndex) {
+        Attrs rowAttrs = tagAttrs("table_row");
+        addAttr(rowAttrs, "index", std::to_string(rowIndex));
+        ctx.md.open("table_row", rowAttrs);
+        for (const WordTableCell& cell : rows[rowIndex]) {
             Attrs cellAttrs = formattedAttrs("table_cell", baseFormat);
-            addAttr(cellAttrs, "column", std::to_string(colIndex++));
+            addAttr(cellAttrs, "column", std::to_string(cell.column));
+            cellAttrs.emplace_back("rowspan", std::to_string(cell.rowspan));
+            cellAttrs.emplace_back("colspan", std::to_string(cell.colspan));
+            addAttr(cellAttrs, "vMerge", cell.vMerge);
+            if (cell.mergeOriginRow < 0 && (cell.rowspan > 1 || cell.colspan > 1)) {
+                addAttr(cellAttrs, "merged", "origin");
+            }
+            if (cell.mergeOriginRow >= 0) {
+                addAttr(cellAttrs, "merged", "covered");
+                addAttr(cellAttrs, "mergeOriginRow", std::to_string(cell.mergeOriginRow));
+                addAttr(cellAttrs, "mergeOriginColumn", std::to_string(cell.mergeOriginColumn));
+            }
             ctx.md.open("table_cell", cellAttrs);
-            emitWordContent(*cellPtr, rels, part, ctx, baseFormat);
+            emitWordContent(*cell.node, rels, part, ctx, baseFormat);
             ctx.md.close("table_cell");
         }
         ctx.md.close("table_row");
@@ -814,7 +1329,11 @@ void emitWordInline(const XmlNode& node, const RelationshipMap& rels, const std:
         emitDocxDrawing(node, rels, part, ctx, currentFormat);
     } else if (name == "oMath" || name == "oMathPara") {
         emitFormula(ctx.md, node);
-    } else if (name == "fldSimple" || name == "smartTag" || name == "sdt" || name == "sdtContent" || name == "ins" || name == "moveTo" || name == "moveFrom") {
+    } else if (name == "ins" || name == "del" || name == "moveTo" || name == "moveFrom") {
+        emitRevision(node, rels, part, ctx, currentFormat);
+    } else if (name == "bookmarkStart" || name == "bookmarkEnd") {
+        emitBookmark(ctx.md, node);
+    } else if (name == "fldSimple" || name == "smartTag" || name == "sdt" || name == "sdtContent") {
         for (const auto& child : node.children) {
             emitWordInline(*child, rels, part, ctx, currentFormat);
         }
@@ -833,6 +1352,10 @@ void emitWordContent(const XmlNode& node, const RelationshipMap& rels, const std
             emitParagraph(*child, rels, part, ctx, baseFormat);
         } else if (name == "tbl") {
             emitTable(*child, rels, part, ctx, baseFormat);
+        } else if (name == "bookmarkStart" || name == "bookmarkEnd") {
+            emitBookmark(ctx.md, *child);
+        } else if (name == "ins" || name == "del" || name == "moveTo" || name == "moveFrom") {
+            emitRevision(*child, rels, part, ctx, baseFormat);
         } else if (name == "sdt" || name == "sdtContent" || name == "body" || name == "footnote" || name == "endnote" || name == "hdr" || name == "ftr") {
             emitWordContent(*child, rels, part, ctx, baseFormat);
         }
@@ -858,10 +1381,34 @@ void parseDocxPart(const Package& package, const std::string& part, DocxContext&
     ctx.md.close("part");
 }
 
+void emitRevisionPartSummaries(const Package& package, MarkdownWriter& md, const std::string& prefix)
+{
+    for (const std::string& part : package.entries(prefix, ".xml")) {
+        std::string lowered = lower(part);
+        if (lowered.find("revision") == std::string::npos && lowered.find("/revisions/") == std::string::npos) {
+            continue;
+        }
+
+        Attrs attrs = tagAttrs("revision");
+        addAttr(attrs, "part", part);
+        try {
+            XmlParser parser;
+            auto doc = parser.parse(package.readEntry(part));
+            if (const XmlNode* root = documentElement(*doc)) {
+                addAttr(attrs, "element", localName(root->name));
+                addRevisionAttrs(attrs, *root);
+            }
+        } catch (...) {
+        }
+        md.empty("revision", attrs);
+    }
+}
+
 void parseDocx(const Package& package, MarkdownWriter& md, const fs::path& source)
 {
-    DocxContext ctx{package, md, {}};
+    DocxContext ctx{package, md, {}, {}};
     ctx.styles.load(package);
+    ctx.numbering.load(package);
 
     md.rawLine("# Office Outline");
     md.rawLine("");
@@ -869,6 +1416,7 @@ void parseDocx(const Package& package, MarkdownWriter& md, const fs::path& sourc
     addAttr(attrs, "type", "docx");
     addAttr(attrs, "source", source.string());
     md.open("document", attrs);
+    emitRevisionPartSummaries(package, md, "word/");
 
     parseDocxPart(package, "word/document.xml", ctx);
     for (const std::string& part : package.entries("word/", ".xml")) {
@@ -883,9 +1431,9 @@ void parseDocx(const Package& package, MarkdownWriter& md, const fs::path& sourc
     md.close("document");
 }
 
-std::vector<TextFormat> loadXlsxFormats(const Package& package)
+std::vector<CellFormat> loadXlsxFormats(const Package& package)
 {
-    std::vector<TextFormat> formats;
+    std::vector<CellFormat> formats;
     if (!package.exists("xl/styles.xml")) {
         return formats;
     }
@@ -904,16 +1452,21 @@ std::vector<TextFormat> loadXlsxFormats(const Package& package)
     }
     if (const XmlNode* xfs = firstChildLocal(*root, "cellXfs")) {
         for (const XmlNode* xf : childrenLocal(*xfs, "xf")) {
-            TextFormat format;
+            CellFormat format;
             std::string fontId = attrLocal(*xf, "fontId");
             if (!fontId.empty()) {
                 try {
                     size_t idx = static_cast<size_t>(std::stoul(fontId));
                     if (idx < fonts.size()) {
-                        format = fonts[idx];
+                        format.text = fonts[idx];
                     }
                 } catch (...) {
                 }
+            }
+            if (const XmlNode* alignment = firstChildLocal(*xf, "alignment")) {
+                format.alignment = attrLocal(*alignment, "horizontal");
+                format.verticalAlignment = attrLocal(*alignment, "vertical");
+                format.indent = attrLocal(*alignment, "indent");
             }
             formats.push_back(format);
         }
@@ -935,7 +1488,7 @@ std::vector<std::string> loadSharedStrings(const Package& package)
     return shared;
 }
 
-TextFormat xlsxCellFormat(const std::vector<TextFormat>& formats, const XmlNode& cell)
+CellFormat xlsxCellFormat(const std::vector<CellFormat>& formats, const XmlNode& cell)
 {
     std::string style = attrLocal(cell, "s");
     if (style.empty()) {
@@ -972,10 +1525,85 @@ std::string xlsxCellText(const XmlNode& cell, const std::vector<std::string>& sh
     return value;
 }
 
+struct CellAddress {
+    int row = 0;
+    int column = 0;
+};
+
+struct CellRange {
+    CellAddress start;
+    CellAddress end;
+    std::string ref;
+};
+
+std::optional<CellAddress> parseCellAddress(std::string_view ref)
+{
+    CellAddress address;
+    size_t pos = 0;
+    while (pos < ref.size() && std::isalpha(static_cast<unsigned char>(ref[pos]))) {
+        address.column = address.column * 26 + (std::toupper(static_cast<unsigned char>(ref[pos])) - 'A' + 1);
+        ++pos;
+    }
+    while (pos < ref.size() && std::isdigit(static_cast<unsigned char>(ref[pos]))) {
+        address.row = address.row * 10 + (ref[pos] - '0');
+        ++pos;
+    }
+    if (address.row <= 0 || address.column <= 0) {
+        return std::nullopt;
+    }
+    return address;
+}
+
+std::optional<CellRange> parseCellRange(std::string ref)
+{
+    size_t colon = ref.find(':');
+    if (colon == std::string::npos) {
+        return std::nullopt;
+    }
+    std::optional<CellAddress> start = parseCellAddress(std::string_view(ref).substr(0, colon));
+    std::optional<CellAddress> end = parseCellAddress(std::string_view(ref).substr(colon + 1));
+    if (!start || !end) {
+        return std::nullopt;
+    }
+    CellRange range;
+    range.start = *start;
+    range.end = *end;
+    range.ref = std::move(ref);
+    return range;
+}
+
+bool containsCell(const CellRange& range, const CellAddress& address)
+{
+    return address.row >= range.start.row && address.row <= range.end.row && address.column >= range.start.column && address.column <= range.end.column;
+}
+
+const CellRange* findMergeRange(const std::vector<CellRange>& ranges, const CellAddress& address)
+{
+    for (const CellRange& range : ranges) {
+        if (containsCell(range, address)) {
+            return &range;
+        }
+    }
+    return nullptr;
+}
+
+std::vector<CellRange> xlsxMergeRanges(const XmlNode& worksheet)
+{
+    std::vector<CellRange> ranges;
+    for (const XmlNode* mergeCell : descendantsLocal(worksheet, "mergeCell")) {
+        std::optional<CellRange> range = parseCellRange(attrLocal(*mergeCell, "ref"));
+        if (range) {
+            ranges.push_back(std::move(*range));
+        }
+    }
+    return ranges;
+}
+
 void emitDrawingTextBody(const XmlNode& body, MarkdownWriter& md, const TextFormat& baseFormat, const RelationshipMap& rels, const std::string& part)
 {
     for (const XmlNode* paragraph : descendantsLocal(body, "p")) {
         Attrs pAttrs = formattedAttrs("paragraph", baseFormat);
+        addParagraphAttrs(pAttrs, drawingParagraphInfo(*paragraph));
         md.open("paragraph", pAttrs);
         for (const auto& child : paragraph->children) {
             if (localName(child->name) != "r") {
@@ -1005,13 +1633,120 @@ void emitDrawingTextBody(const XmlNode& body, MarkdownWriter& md, const TextForm
     }
 }
 
-void emitChartRef(const XmlNode& chart, MarkdownWriter& md, const RelationshipMap& rels, const std::string& part)
+const XmlNode* firstDescendantLocalNode(const XmlNode& node, std::string_view name)
+{
+    std::vector<const XmlNode*> nodes = descendantsLocal(node, name);
+    return nodes.empty() ? nullptr : nodes.front();
+}
+
+bool endsWith(std::string_view value, std::string_view suffix)
+{
+    return value.size() >= suffix.size() && value.substr(value.size() - suffix.size()) == suffix;
+}
+
+std::string firstFormulaRef(const XmlNode& node)
+{
+    const XmlNode* formula = firstDescendantLocalNode(node, "f");
+    return formula ? formula->text : std::string();
+}
+
+std::string firstCachedPointValue(const XmlNode& node)
+{
+    for (const XmlNode* point : descendantsLocal(node, "pt")) {
+        if (const XmlNode* value = firstChildLocal(*point, "v")) {
+            return value->text;
+        }
+    }
+    return {};
+}
+
+std::string chartType(const XmlNode& root)
+{
+    const XmlNode* plotArea = firstDescendantLocalNode(root, "plotArea");
+    if (!plotArea) {
+        return {};
+    }
+    for (const auto& child : plotArea->children) {
+        std::string name = localName(child->name);
+        if (endsWith(name, "Chart")) {
+            return name;
+        }
+    }
+    return {};
+}
+
+std::string chartTitle(const XmlNode& root)
+{
+    const XmlNode* title = firstDescendantLocalNode(root, "title");
+    if (!title) {
+        return {};
+    }
+    std::string text = textDescendants(*title, "t");
+    if (text.empty()) {
+        text = firstCachedPointValue(*title);
+    }
+    if (text.empty()) {
+        text = firstFormulaRef(*title);
+    }
+    return text;
+}
+
+std::string chartSeriesName(const XmlNode& series)
+{
+    const XmlNode* tx = firstChildLocal(series, "tx");
+    if (!tx) {
+        return {};
+    }
+    std::string name = textDescendants(*tx, "t");
+    if (name.empty()) {
+        name = firstCachedPointValue(*tx);
+    }
+    if (name.empty()) {
+        name = firstFormulaRef(*tx);
+    }
+    return name;
+}
+
+void emitChartRef(const Package& package, const XmlNode& chart, MarkdownWriter& md, const RelationshipMap& rels, const std::string& part)
 {
     std::string id = relationshipIdAttr(chart);
+    std::string target = relationshipTarget(rels, id, part);
     Attrs attrs = tagAttrs("chart");
     addAttr(attrs, "relationshipId", id);
-    addAttr(attrs, "target", relationshipTarget(rels, id, part));
-    md.empty("chart", attrs);
+    addAttr(attrs, "target", target);
+
+    if (target.empty() || isExternalTarget(target) || !package.exists(target)) {
+        md.empty("chart", attrs);
+        return;
+    }
+
+    XmlParser parser;
+    auto doc = parser.parse(package.readEntry(target));
+    addAttr(attrs, "chartType", chartType(*doc));
+    addAttr(attrs, "title", chartTitle(*doc));
+    md.open("chart", attrs);
+
+    for (const XmlNode* series : descendantsLocal(*doc, "ser")) {
+        Attrs seriesAttrs = tagAttrs("chart_series");
+        if (const XmlNode* idx = firstChildLocal(*series, "idx")) {
+            addAttr(seriesAttrs, "index", attrLocal(*idx, "val"));
+        }
+        addAttr(seriesAttrs, "name", chartSeriesName(*series));
+        if (const XmlNode* tx = firstChildLocal(*series, "tx")) {
+            addAttr(seriesAttrs, "nameRef", firstFormulaRef(*tx));
+        }
+        if (const XmlNode* cat = firstChildLocal(*series, "cat")) {
+            addAttr(seriesAttrs, "categoriesRef", firstFormulaRef(*cat));
+            addAttr(seriesAttrs, "categoryCount", std::to_string(descendantsLocal(*cat, "pt").size()));
+        }
+        if (const XmlNode* val = firstChildLocal(*series, "val")) {
+            addAttr(seriesAttrs, "valuesRef", firstFormulaRef(*val));
+            addAttr(seriesAttrs, "valueCount", std::to_string(descendantsLocal(*val, "pt").size()));
+        }
+        md.empty("chart_series", seriesAttrs);
+    }
+
+    md.close("chart");
 }
 
 void emitOoxDrawingPart(const Package& package, const std::string& part, MarkdownWriter& md, const TextFormat& baseFormat)
@@ -1033,11 +1768,15 @@ void emitOoxDrawingPart(const Package& package, const std::string& part, Markdow
         }
         Attrs imageAttrs = tagAttrs("image");
         addAttr(imageAttrs, "relationshipId", id);
-        addAttr(imageAttrs, "target", relationshipTarget(rels, id, part));
+        std::string target = relationshipTarget(rels, id, part);
+        addAttr(imageAttrs, "target", target);
+        addNonVisualAttrs(imageAttrs, *blip);
+        addEmbeddedObjectAttrs(imageAttrs, package, target);
         md.empty("image", imageAttrs);
     }
     for (const XmlNode* shape : descendantsLocal(*doc, "sp")) {
         Attrs shapeAttrs = tagAttrs("shape");
+        addNonVisualAttrs(shapeAttrs, *shape);
         if (const XmlNode* cNvPr = firstChildLocal(*shape, "cNvPr")) {
             addAttr(shapeAttrs, "id", attrLocal(*cNvPr, "id"));
             addAttr(shapeAttrs, "name", attrLocal(*cNvPr, "name"));
@@ -1058,6 +1797,7 @@ void emitOoxDrawingPart(const Package& package, const std::string& part, Markdow
     for (const XmlNode* frame : descendantsLocal(*doc, "graphicFrame")) {
         Attrs frameAttrs = tagAttrs("shape");
         addAttr(frameAttrs, "sourceElement", frame->name);
+        addNonVisualAttrs(frameAttrs, *frame);
         std::vector<const XmlNode*> nonVisualProps = descendantsLocal(*frame, "cNvPr");
         if (!nonVisualProps.empty()) {
             addAttr(frameAttrs, "id", attrLocal(*nonVisualProps.front(), "id"));
@@ -1065,7 +1805,7 @@ void emitOoxDrawingPart(const Package& package, const std::string& part, Markdow
         }
         md.open("shape", frameAttrs);
         for (const XmlNode* chart : descendantsLocal(*frame, "chart")) {
-            emitChartRef(*chart, md, rels, part);
+            emitChartRef(package, *chart, md, rels, part);
         }
         md.close("shape");
     }
@@ -1078,11 +1818,12 @@ void parseWorksheet(const Package& package,
                     const std::string& name,
                     MarkdownWriter& md,
                     const std::vector<std::string>& shared,
-                    const std::vector<TextFormat>& formats)
+                    const std::vector<CellFormat>& formats)
 {
     XmlParser parser;
     auto doc = parser.parse(package.readEntry(part));
     RelationshipMap rels = loadRelationships(package, part);
+    std::vector<CellRange> mergeRanges = xlsxMergeRanges(*doc);
 
     std::map<std::string, std::string> hyperlinkTargets;
     for (const XmlNode* hyperlink : descendantsLocal(*doc, "hyperlink")) {
@@ -1107,16 +1848,40 @@ void parseWorksheet(const Package& package,
         addAttr(rowAttrs, "index", attrLocal(*row, "r"));
         md.open("table_row", rowAttrs);
         for (const XmlNode* cell : childrenLocal(*row, "c")) {
-            TextFormat format = xlsxCellFormat(formats, *cell);
-            Attrs cellAttrs = formattedAttrs("table_cell", format);
+            CellFormat format = xlsxCellFormat(formats, *cell);
+            Attrs cellAttrs = formattedCellAttrs("table_cell", format);
             std::string ref = attrLocal(*cell, "r");
             addAttr(cellAttrs, "ref", ref);
+            std::string rowspanValue = "1";
+            std::string colspanValue = "1";
+            std::optional<CellAddress> address = parseCellAddress(ref);
+            if (address) {
+                const CellRange* mergeRange = findMergeRange(mergeRanges, *address);
+                if (mergeRange) {
+                    int rowspan = mergeRange->end.row - mergeRange->start.row + 1;
+                    int colspan = mergeRange->end.column - mergeRange->start.column + 1;
+                    addAttr(cellAttrs, "mergedRef", mergeRange->ref);
+                    if (address->row == mergeRange->start.row && address->column == mergeRange->start.column) {
+                        addAttr(cellAttrs, "merged", "origin");
+                        rowspanValue = std::to_string(rowspan);
+                        colspanValue = std::to_string(colspan);
+                    } else {
+                        addAttr(cellAttrs, "merged", "covered");
+                        addAttr(cellAttrs, "mergeOriginRow", std::to_string(mergeRange->start.row));
+                        addAttr(cellAttrs, "mergeOriginColumn", std::to_string(mergeRange->start.column));
+                        rowspanValue = "0";
+                        colspanValue = "0";
+                    }
+                }
+            }
+            cellAttrs.emplace_back("rowspan", rowspanValue);
+            cellAttrs.emplace_back("colspan", colspanValue);
             md.open("table_cell", cellAttrs);
 
             auto hyperlinkIt = hyperlinkTargets.find(ref);
             bool hasHyperlink = hyperlinkIt != hyperlinkTargets.end();
             if (hasHyperlink) {
-                Attrs hAttrs = formattedAttrs("hyperlink", format);
+                Attrs hAttrs = formattedAttrs("hyperlink", format.text);
                 addAttr(hAttrs, "target", hyperlinkIt->second);
                 md.open("hyperlink", hAttrs);
             }
@@ -1125,7 +1890,7 @@ void parseWorksheet(const Package& package,
             }
             std::string value = xlsxCellText(*cell, shared);
             if (!value.empty()) {
-                emitPlainText(md, format, value);
+                emitPlainText(md, format.text, value);
             }
             if (hasHyperlink) {
                 md.close("hyperlink");
@@ -1153,14 +1918,23 @@ void parseXlsx(const Package& package, MarkdownWriter& md, const fs::path& sourc
     addAttr(attrs, "type", "xlsx");
     addAttr(attrs, "source", source.string());
     md.open("document", attrs);
+    emitRevisionPartSummaries(package, md, "xl/");
 
-    std::vector<TextFormat> formats = loadXlsxFormats(package);
+    std::vector<CellFormat> formats = loadXlsxFormats(package);
     std::vector<std::string> shared = loadSharedStrings(package);
     RelationshipMap workbookRels = loadRelationships(package, "xl/workbook.xml");
 
     if (package.exists("xl/workbook.xml")) {
         XmlParser parser;
         auto doc = parser.parse(package.readEntry("xl/workbook.xml"));
+        for (const XmlNode* definedName : descendantsLocal(*doc, "definedName")) {
+            Attrs bookmarkAttrs = tagAttrs("bookmark");
+            addAttr(bookmarkAttrs, "type", "definedName");
+            addAttr(bookmarkAttrs, "name", attrLocal(*definedName, "name"));
+            addAttr(bookmarkAttrs, "localSheetId", attrLocal(*definedName, "localSheetId"));
+            addAttr(bookmarkAttrs, "hidden", attrLocal(*definedName, "hidden"));
+            md.text("bookmark", bookmarkAttrs, definedName->text);
+        }
         for (const XmlNode* sheet : descendantsLocal(*doc, "sheet")) {
             std::string sheetName = attrLocal(*sheet, "name");
             std::string id = relationshipIdAttr(*sheet);
@@ -1186,10 +1960,32 @@ void emitPptxTable(const XmlNode& table, MarkdownWriter& md, const RelationshipM
         int colIndex = 0;
         for (const XmlNode* cell : childrenLocal(*row, "tc")) {
             Attrs cellAttrs = formattedAttrs("table_cell", baseFormat);
-            addAttr(cellAttrs, "column", std::to_string(colIndex++));
+            std::string colspan = attrLocal(*cell, "gridSpan");
+            std::string rowspan = attrLocal(*cell, "rowSpan");
+            int colSpanValue = 1;
+            if (!colspan.empty()) {
+                try {
+                    colSpanValue = std::max(1, std::stoi(colspan));
+                } catch (...) {
+                    colSpanValue = 1;
+                }
+            }
+            addAttr(cellAttrs, "column", std::to_string(colIndex));
+            cellAttrs.emplace_back("rowspan", rowspan.empty() ? "1" : rowspan);
+            cellAttrs.emplace_back("colspan", colspan.empty() ? "1" : colspan);
+            std::string hMerge = attrLocal(*cell, "hMerge");
+            std::string vMerge = attrLocal(*cell, "vMerge");
+            addAttr(cellAttrs, "hMerge", hMerge);
+            addAttr(cellAttrs, "vMerge", vMerge);
+            if ((!hMerge.empty() && !isFalseValue(hMerge)) || (!vMerge.empty() && !isFalseValue(vMerge))) {
+                addAttr(cellAttrs, "merged", "covered");
+            } else if ((rowspan.empty() ? "1" : rowspan) != "1" || (colspan.empty() ? "1" : colspan) != "1") {
+                addAttr(cellAttrs, "merged", "origin");
+            }
             md.open("table_cell", cellAttrs);
             emitDrawingTextBody(*cell, md, baseFormat, rels, part);
             md.close("table_cell");
+            colIndex += colSpanValue;
         }
         md.close("table_row");
     }
@@ -1208,6 +2004,7 @@ void parseSlide(const Package& package, const std::string& part, const std::stri
     addAttr(slideAttrs, "name", slideName);
     addAttr(slideAttrs, "path", part);
     md.open("part", slideAttrs);
+    emitGenericBookmarks(*doc, md);
 
     for (const XmlNode* pic : descendantsLocal(*doc, "pic")) {
         Attrs drawingAttrs = tagAttrs("drawing_object");
@@ -1217,7 +2014,10 @@ void parseSlide(const Package& package, const std::string& part, const std::stri
             std::string id = attrLocal(*blip, "embed");
             Attrs imageAttrs = tagAttrs("image");
             addAttr(imageAttrs, "relationshipId", id);
-            addAttr(imageAttrs, "target", relationshipTarget(rels, id, part));
+            std::string target = relationshipTarget(rels, id, part);
+            addAttr(imageAttrs, "target", target);
+            addNonVisualAttrs(imageAttrs, *blip);
+            addEmbeddedObjectAttrs(imageAttrs, package, target);
             md.empty("image", imageAttrs);
         }
         md.close("drawing_object");
@@ -1225,6 +2025,7 @@ void parseSlide(const Package& package, const std::string& part, const std::stri
 
     for (const XmlNode* shape : descendantsLocal(*doc, "sp")) {
         Attrs shapeAttrs = tagAttrs("shape");
+        addNonVisualAttrs(shapeAttrs, *shape);
         if (const XmlNode* cNvPr = descendantsLocal(*shape, "cNvPr").empty() ? nullptr : descendantsLocal(*shape, "cNvPr").front()) {
             addAttr(shapeAttrs, "id", attrLocal(*cNvPr, "id"));
             addAttr(shapeAttrs, "name", attrLocal(*cNvPr, "name"));
@@ -1249,6 +2050,7 @@ void parseSlide(const Package& package, const std::string& part, const std::stri
         }
         Attrs frameAttrs = tagAttrs("shape");
         addAttr(frameAttrs, "sourceElement", frame->name);
+        addNonVisualAttrs(frameAttrs, *frame);
         std::vector<const XmlNode*> nonVisualProps = descendantsLocal(*frame, "cNvPr");
         if (!nonVisualProps.empty()) {
             addAttr(frameAttrs, "id", attrLocal(*nonVisualProps.front(), "id"));
@@ -1256,7 +2058,7 @@ void parseSlide(const Package& package, const std::string& part, const std::stri
         }
         md.open("shape", frameAttrs);
         for (const XmlNode* chart : charts) {
-            emitChartRef(*chart, md, rels, part);
+            emitChartRef(package, *chart, md, rels, part);
         }
         md.close("shape");
     }
@@ -1276,6 +2078,7 @@ void parsePptx(const Package& package, MarkdownWriter& md, const fs::path& sourc
     addAttr(attrs, "type", "pptx");
     addAttr(attrs, "source", source.string());
     md.open("document", attrs);
+    emitRevisionPartSummaries(package, md, "ppt/");
 
     RelationshipMap rels = loadRelationships(package, "ppt/presentation.xml");
     if (package.exists("ppt/presentation.xml")) {

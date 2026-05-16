@@ -37,6 +37,9 @@ Markdown 文件中使用 XML/HTML 风格标签表达元素层级。当前覆盖�
 - `image`
 - `shape`
 - `chart`
+- `chart_series`
+- `bookmark`
+- `revision`
 
 文本相关元素会带上格式属性：
 
@@ -46,6 +49,14 @@ Markdown 文件中使用 XML/HTML 风格标签表达元素层级。当前覆盖�
 - `bold`
 - `italic`
 - `underline`
+
+段落、表格和媒体相关元素会尽量保留 OOXML 结构信息：
+
+- 段落：`alignment`、`indentLeft`、`indentRight`、`indentFirstLine`、`indentHanging`、`listId`、`listLevel`、`listType`
+- 表格单元格：`rowspan`、`colspan`、`merged`、`mergedRef`、`mergeOriginRow`、`mergeOriginColumn`
+- 图片：`target`、`contentType`、`sizeBytes`、`dataAvailable`、`objectName`、`description`
+- 图表：`chartType`、`title`、`chart_series` 中的系列名、数据区域引用和点数量
+- 修订和书签：`revision`、`bookmark` 标签会输出可解析到的 `id`、`author`、`date`、`name` 等属性
 
 ## 测试
 
