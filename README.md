@@ -36,6 +36,7 @@ Markdown 文件中使用 XML/HTML 风格标签表达元素层级。当前覆盖�
 - `formula`
 - `image`
 - `shape`
+- `chart`
 
 文本相关元素会带上格式属性：
 
@@ -50,15 +51,18 @@ Markdown 文件中使用 XML/HTML 风格标签表达元素层级。当前覆盖�
 
 ```bash
 make test-docx
+make test-ooxml-corpus
 ```
 
-该目标会解析 `corpus/北大博士研究生毕业论文格式.docx`，生成：
+`make test-docx` 会解析 `corpus/北大博士研究生毕业论文格式.docx`，生成：
 
 ```text
 examples/北大博士研究生毕业论文格式.md
 ```
 
 并校验样例输出中包含核心标签和字体格式属性。
+
+`make test-ooxml-corpus` 会解析 `corpus/xlsx/` 和 `corpus/pptx/` 下的 `.xlsx`、`.pptx` 文件，输出到 `examples/`，并校验表格、幻灯片、形状、文本和图表等关键标签。
 
 ## LibreOffice 参考点
 

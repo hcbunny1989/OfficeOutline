@@ -1005,6 +1005,15 @@ void emitDrawingTextBody(const XmlNode& body, MarkdownWriter& md, const TextForm
     }
 }
 
+void emitChartRef(const XmlNode& chart, MarkdownWriter& md, const RelationshipMap& rels, const std::string& part)
+{
+    std::string id = relationshipIdAttr(chart);
+    Attrs attrs = tagAttrs("chart");
+    addAttr(attrs, "relationshipId", id);
+    addAttr(attrs, "target", relationshipTarget(rels, id, part));
+    md.empty("chart", attrs);
+}
+
 void emitOoxDrawingPart(const Package& package, const std::string& part, MarkdownWriter& md, const TextFormat& baseFormat)
 {
     if (!package.exists(part)) {
@@ -1042,6 +1051,21 @@ void emitOoxDrawingPart(const Package& package, const std::string& part, Markdow
             md.open("text_box", boxAttrs);
             emitDrawingTextBody(*txBody, md, baseFormat, rels, part);
             md.close("text_box");
+        }
+        md.close("shape");
+    }
+
+    for (const XmlNode* frame : descendantsLocal(*doc, "graphicFrame")) {
+        Attrs frameAttrs = tagAttrs("shape");
+        addAttr(frameAttrs, "sourceElement", frame->name);
+        std::vector<const XmlNode*> nonVisualProps = descendantsLocal(*frame, "cNvPr");
+        if (!nonVisualProps.empty()) {
+            addAttr(frameAttrs, "id", attrLocal(*nonVisualProps.front(), "id"));
+            addAttr(frameAttrs, "name", attrLocal(*nonVisualProps.front(), "name"));
+        }
+        md.open("shape", frameAttrs);
+        for (const XmlNode* chart : descendantsLocal(*frame, "chart")) {
+            emitChartRef(*chart, md, rels, part);
         }
         md.close("shape");
     }
@@ -1214,6 +1238,25 @@ void parseSlide(const Package& package, const std::string& part, const std::stri
             md.open("text_box", boxAttrs);
             emitDrawingTextBody(*txBody, md, baseFormat, rels, part);
             md.close("text_box");
+        }
+        md.close("shape");
+    }
+
+    for (const XmlNode* frame : descendantsLocal(*doc, "graphicFrame")) {
+        std::vector<const XmlNode*> charts = descendantsLocal(*frame, "chart");
+        if (charts.empty()) {
+            continue;
+        }
+        Attrs frameAttrs = tagAttrs("shape");
+        addAttr(frameAttrs, "sourceElement", frame->name);
+        std::vector<const XmlNode*> nonVisualProps = descendantsLocal(*frame, "cNvPr");
+        if (!nonVisualProps.empty()) {
+            addAttr(frameAttrs, "id", attrLocal(*nonVisualProps.front(), "id"));
+            addAttr(frameAttrs, "name", attrLocal(*nonVisualProps.front(), "name"));
+        }
+        md.open("shape", frameAttrs);
+        for (const XmlNode* chart : charts) {
+            emitChartRef(*chart, md, rels, part);
         }
         md.close("shape");
     }

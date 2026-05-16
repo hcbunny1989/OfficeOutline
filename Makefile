@@ -6,7 +6,7 @@ BIN := office-outline
 SRC := src/office_outline.cpp src/xml.cpp
 OBJ := $(SRC:.cpp=.o)
 
-.PHONY: all clean test-docx
+.PHONY: all clean test-docx test-ooxml-corpus
 
 all: $(BIN)
 
@@ -18,6 +18,9 @@ $(BIN): $(OBJ)
 
 test-docx: $(BIN)
 	bash scripts/test_docx.sh ./$(BIN)
+
+test-ooxml-corpus: $(BIN)
+	bash scripts/test_ooxml_corpus.sh ./$(BIN)
 
 clean:
 	rm -f $(BIN) $(OBJ)
