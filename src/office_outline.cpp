@@ -455,6 +455,11 @@ public:
         return readFile(temp_.path() / fs::path(entry));
     }
 
+    fs::path entryPath(const std::string& entry) const
+    {
+        return temp_.path() / fs::path(entry);
+    }
+
     std::vector<std::string> entries(const std::string& prefix, const std::string& suffix = {}) const
     {
         std::vector<std::string> result;
@@ -869,6 +874,7 @@ Attrs formattedCellAttrs(std::string tag, const CellFormat& format)
 void emitWordContent(const XmlNode& node, const RelationshipMap& rels, const std::string& part, DocxContext& ctx, const TextFormat& baseFormat);
 void emitWordInline(const XmlNode& node, const RelationshipMap& rels, const std::string& part, DocxContext& ctx, const TextFormat& currentFormat);
 void emitChartRef(const Package& package, const XmlNode& chart, MarkdownWriter& md, const RelationshipMap& rels, const std::string& part);
+void emitEmbeddedXlsxTables(const Package& package, MarkdownWriter& md, const std::string& tableRole);
 
 TextFormat paragraphFormat(const XmlNode& paragraph, const StyleSet& styles, std::string& styleId)
 {
@@ -1660,6 +1666,64 @@ std::string firstCachedPointValue(const XmlNode& node)
     return {};
 }
 
+std::vector<std::pair<std::string, std::string>> cachedPointValues(const XmlNode* node)
+{
+    std::vector<std::pair<std::string, std::string>> values;
+    if (!node) {
+        return values;
+    }
+    for (const XmlNode* point : descendantsLocal(*node, "pt")) {
+        const XmlNode* value = firstChildLocal(*point, "v");
+        values.emplace_back(attrLocal(*point, "idx"), value ? value->text : std::string());
+    }
+    return values;
+}
+
+const XmlNode* ancestorLocal(const XmlNode& node, std::string_view ancestorName)
+{
+    for (const XmlNode* current = node.parent; current; current = current->parent) {
+        if (localName(current->name) == ancestorName) {
+            return current;
+        }
+    }
+    return nullptr;
+}
+
+std::string onOffAttr(const XmlNode* parent, std::string_view childName)
+{
+    const XmlNode* child = parent ? firstChildLocal(*parent, childName) : nullptr;
+    if (!child) {
+        return {};
+    }
+    std::string value = attrLocal(*child, "val");
+    if (value.empty()) {
+        return "true";
+    }
+    return isFalseValue(value) ? "false" : "true";
+}
+
+std::string firstChildVal(const XmlNode* parent, std::string_view childName)
+{
+    const XmlNode* child = parent ? firstChildLocal(*parent, childName) : nullptr;
+    return child ? attrLocal(*child, "val") : std::string();
+}
+
+void addLayoutAttrs(Attrs& attrs, const XmlNode* layout)
+{
+    if (!layout) {
+        return;
+    }
+    if (const XmlNode* manual = firstChildLocal(*layout, "manualLayout")) {
+        addAttr(attrs, "layoutTarget", firstChildVal(manual, "layoutTarget"));
+        addAttr(attrs, "xMode", firstChildVal(manual, "xMode"));
+        addAttr(attrs, "yMode", firstChildVal(manual, "yMode"));
+        addAttr(attrs, "x", firstChildVal(manual, "x"));
+        addAttr(attrs, "y", firstChildVal(manual, "y"));
+        addAttr(attrs, "w", firstChildVal(manual, "w"));
+        addAttr(attrs, "h", firstChildVal(manual, "h"));
+    }
+}
+
 std::string chartType(const XmlNode& root)
 {
     const XmlNode* plotArea = firstDescendantLocalNode(root, "plotArea");
@@ -1707,6 +1771,331 @@ std::string chartSeriesName(const XmlNode& series)
     return name;
 }
 
+struct ChartStyle {
+    std::string fillColor;
+    std::string lineColor;
+};
+
+std::string chartColorValue(const XmlNode* solidFill)
+{
+    if (!solidFill) {
+        return {};
+    }
+    if (const XmlNode* color = firstChildLocal(*solidFill, "srgbClr")) {
+        return normalizeColor(attrLocal(*color, "val"));
+    }
+    if (const XmlNode* color = firstChildLocal(*solidFill, "schemeClr")) {
+        return attrLocal(*color, "val");
+    }
+    if (const XmlNode* color = firstChildLocal(*solidFill, "prstClr")) {
+        return attrLocal(*color, "val");
+    }
+    if (const XmlNode* color = firstChildLocal(*solidFill, "sysClr")) {
+        std::string value = attrLocal(*color, "lastClr");
+        return value.empty() ? attrLocal(*color, "val") : normalizeColor(value);
+    }
+    return {};
+}
+
+ChartStyle chartStyleFromSpPr(const XmlNode* spPr)
+{
+    ChartStyle style;
+    if (!spPr) {
+        return style;
+    }
+    style.fillColor = chartColorValue(firstChildLocal(*spPr, "solidFill"));
+    if (const XmlNode* line = firstChildLocal(*spPr, "ln")) {
+        style.lineColor = chartColorValue(firstChildLocal(*line, "solidFill"));
+    }
+    return style;
+}
+
+void addChartStyleAttrs(Attrs& attrs, const ChartStyle& style)
+{
+    addAttr(attrs, "fillColor", style.fillColor);
+    addAttr(attrs, "lineColor", style.lineColor);
+}
+
+std::map<std::string, ChartStyle> chartPointStyles(const XmlNode& series)
+{
+    std::map<std::string, ChartStyle> styles;
+    for (const XmlNode* point : childrenLocal(series, "dPt")) {
+        std::string index = firstChildVal(point, "idx");
+        if (!index.empty()) {
+            styles[index] = chartStyleFromSpPr(firstChildLocal(*point, "spPr"));
+        }
+    }
+    return styles;
+}
+
+std::map<std::string, std::string> chartLegendEntryDeletes(const XmlNode& legend)
+{
+    std::map<std::string, std::string> deletes;
+    for (const XmlNode* entry : childrenLocal(legend, "legendEntry")) {
+        std::string index = firstChildVal(entry, "idx");
+        if (!index.empty()) {
+            deletes[index] = onOffAttr(entry, "delete");
+        }
+    }
+    return deletes;
+}
+
+bool chartUsesPointLegend(const XmlNode& root)
+{
+    std::string type = lower(chartType(root));
+    return type.find("pie") != std::string::npos || type.find("doughnut") != std::string::npos;
+}
+
+void addChartFrameAttrs(Attrs& attrs, const XmlNode& chart)
+{
+    for (const XmlNode* current = chart.parent; current; current = current->parent) {
+        std::string name = localName(current->name);
+        if (name == "graphicFrame" || name == "sp" || name == "pic") {
+            const XmlNode* xfrm = firstChildLocal(*current, "xfrm");
+            if (!xfrm) {
+                xfrm = firstDescendantLocalNode(*current, "xfrm");
+            }
+            const XmlNode* off = xfrm ? firstChildLocal(*xfrm, "off") : nullptr;
+            const XmlNode* ext = xfrm ? firstChildLocal(*xfrm, "ext") : nullptr;
+            if (off || ext) {
+                addAttr(attrs, "anchorType", name);
+                if (off) {
+                    addAttr(attrs, "xPt", emuToPt(attrLocal(*off, "x")));
+                    addAttr(attrs, "yPt", emuToPt(attrLocal(*off, "y")));
+                }
+                if (ext) {
+                    addAttr(attrs, "widthPt", emuToPt(attrLocal(*ext, "cx")));
+                    addAttr(attrs, "heightPt", emuToPt(attrLocal(*ext, "cy")));
+                }
+                return;
+            }
+        }
+        if (name == "inline" || name == "anchor") {
+            addAttr(attrs, "anchorType", name);
+            if (const XmlNode* extent = firstChildLocal(*current, "extent")) {
+                addAttr(attrs, "widthPt", emuToPt(attrLocal(*extent, "cx")));
+                addAttr(attrs, "heightPt", emuToPt(attrLocal(*extent, "cy")));
+            }
+            if (const XmlNode* positionH = firstChildLocal(*current, "positionH")) {
+                addAttr(attrs, "horizontalRelativeFrom", attrLocal(*positionH, "relativeFrom"));
+                if (const XmlNode* align = firstChildLocal(*positionH, "align")) {
+                    addAttr(attrs, "horizontalAlign", align->text);
+                }
+                if (const XmlNode* offset = firstChildLocal(*positionH, "posOffset")) {
+                    addAttr(attrs, "xPt", emuToPt(offset->text));
+                }
+            }
+            if (const XmlNode* positionV = firstChildLocal(*current, "positionV")) {
+                addAttr(attrs, "verticalRelativeFrom", attrLocal(*positionV, "relativeFrom"));
+                if (const XmlNode* align = firstChildLocal(*positionV, "align")) {
+                    addAttr(attrs, "verticalAlign", align->text);
+                }
+                if (const XmlNode* offset = firstChildLocal(*positionV, "posOffset")) {
+                    addAttr(attrs, "yPt", emuToPt(offset->text));
+                }
+            }
+            return;
+        }
+        if (name == "twoCellAnchor" || name == "oneCellAnchor" || name == "absoluteAnchor") {
+            addAttr(attrs, "anchorType", name);
+            if (const XmlNode* from = firstChildLocal(*current, "from")) {
+                addAttr(attrs, "fromColumn", childText(*from, "col"));
+                addAttr(attrs, "fromRow", childText(*from, "row"));
+                addAttr(attrs, "fromColumnOffsetPt", emuToPt(childText(*from, "colOff")));
+                addAttr(attrs, "fromRowOffsetPt", emuToPt(childText(*from, "rowOff")));
+            }
+            if (const XmlNode* to = firstChildLocal(*current, "to")) {
+                addAttr(attrs, "toColumn", childText(*to, "col"));
+                addAttr(attrs, "toRow", childText(*to, "row"));
+                addAttr(attrs, "toColumnOffsetPt", emuToPt(childText(*to, "colOff")));
+                addAttr(attrs, "toRowOffsetPt", emuToPt(childText(*to, "rowOff")));
+            }
+            if (const XmlNode* pos = firstChildLocal(*current, "pos")) {
+                addAttr(attrs, "xPt", emuToPt(attrLocal(*pos, "x")));
+                addAttr(attrs, "yPt", emuToPt(attrLocal(*pos, "y")));
+            }
+            if (const XmlNode* ext = firstChildLocal(*current, "ext")) {
+                addAttr(attrs, "widthPt", emuToPt(attrLocal(*ext, "cx")));
+                addAttr(attrs, "heightPt", emuToPt(attrLocal(*ext, "cy")));
+            }
+            return;
+        }
+    }
+}
+
+void emitChartLegend(const XmlNode& root, MarkdownWriter& md)
+{
+    const XmlNode* legend = firstDescendantLocalNode(root, "legend");
+    if (!legend) {
+        return;
+    }
+    Attrs attrs = tagAttrs("chart_legend");
+    addAttr(attrs, "position", firstChildVal(legend, "legendPos"));
+    addAttr(attrs, "overlay", onOffAttr(legend, "overlay"));
+    addAttr(attrs, "deleted", onOffAttr(legend, "delete"));
+    if (const XmlNode* txPr = firstChildLocal(*legend, "txPr")) {
+        if (const XmlNode* defRPr = firstDescendantLocalNode(*txPr, "defRPr")) {
+            addAttr(attrs, "textColor", chartStyleFromSpPr(defRPr).fillColor);
+        }
+    }
+    addLayoutAttrs(attrs, firstChildLocal(*legend, "layout"));
+    md.open("chart_legend", attrs);
+
+    std::map<std::string, std::string> deletedByIndex = chartLegendEntryDeletes(*legend);
+    bool pointLegend = chartUsesPointLegend(root);
+    int entryIndex = 0;
+    for (const XmlNode* series : descendantsLocal(root, "ser")) {
+        std::string seriesIndex = firstChildVal(series, "idx");
+        if (pointLegend) {
+            std::vector<std::pair<std::string, std::string>> categories = cachedPointValues(firstChildLocal(*series, "cat"));
+            std::vector<std::pair<std::string, std::string>> values = cachedPointValues(firstChildLocal(*series, "val"));
+            std::map<std::string, ChartStyle> pointStyles = chartPointStyles(*series);
+            size_t pointCount = std::max(categories.size(), values.size());
+            for (size_t i = 0; i < pointCount; ++i) {
+                std::string pointIndex = i < categories.size() && !categories[i].first.empty() ? categories[i].first : std::to_string(i);
+                Attrs entryAttrs = tagAttrs("chart_legend_entry");
+                addAttr(entryAttrs, "index", std::to_string(entryIndex++));
+                addAttr(entryAttrs, "source", "point");
+                addAttr(entryAttrs, "seriesIndex", seriesIndex);
+                addAttr(entryAttrs, "pointIndex", pointIndex);
+                if (i < categories.size()) {
+                    addAttr(entryAttrs, "label", categories[i].second);
+                }
+                auto deleteIt = deletedByIndex.find(pointIndex);
+                if (deleteIt != deletedByIndex.end()) {
+                    addAttr(entryAttrs, "deleted", deleteIt->second);
+                }
+                auto styleIt = pointStyles.find(pointIndex);
+                if (styleIt != pointStyles.end()) {
+                    addChartStyleAttrs(entryAttrs, styleIt->second);
+                }
+                md.empty("chart_legend_entry", entryAttrs);
+            }
+        } else {
+            Attrs entryAttrs = tagAttrs("chart_legend_entry");
+            std::string index = seriesIndex.empty() ? std::to_string(entryIndex) : seriesIndex;
+            addAttr(entryAttrs, "index", std::to_string(entryIndex++));
+            addAttr(entryAttrs, "source", "series");
+            addAttr(entryAttrs, "seriesIndex", seriesIndex);
+            addAttr(entryAttrs, "label", chartSeriesName(*series));
+            auto deleteIt = deletedByIndex.find(index);
+            if (deleteIt != deletedByIndex.end()) {
+                addAttr(entryAttrs, "deleted", deleteIt->second);
+            }
+            addChartStyleAttrs(entryAttrs, chartStyleFromSpPr(firstChildLocal(*series, "spPr")));
+            md.empty("chart_legend_entry", entryAttrs);
+        }
+    }
+
+    md.close("chart_legend");
+}
+
+void emitChartAxes(const XmlNode& root, MarkdownWriter& md)
+{
+    for (std::string axisName : {"catAx", "valAx", "dateAx", "serAx"}) {
+        for (const XmlNode* axis : descendantsLocal(root, axisName)) {
+            Attrs attrs = tagAttrs("chart_axis");
+            addAttr(attrs, "type", axisName);
+            addAttr(attrs, "id", firstChildVal(axis, "axId"));
+            addAttr(attrs, "position", firstChildVal(axis, "axPos"));
+            addAttr(attrs, "title", textDescendants(*axis, "t"));
+            addAttr(attrs, "crossAxis", firstChildVal(axis, "crossAx"));
+            addAttr(attrs, "crosses", firstChildVal(axis, "crosses"));
+            addAttr(attrs, "tickLabelPosition", firstChildVal(axis, "tickLblPos"));
+            addAttr(attrs, "majorTickMark", firstChildVal(axis, "majorTickMark"));
+            addAttr(attrs, "minorTickMark", firstChildVal(axis, "minorTickMark"));
+            addAttr(attrs, "orientation", firstChildVal(firstChildLocal(*axis, "scaling"), "orientation"));
+            addAttr(attrs, "min", firstChildVal(firstChildLocal(*axis, "scaling"), "min"));
+            addAttr(attrs, "max", firstChildVal(firstChildLocal(*axis, "scaling"), "max"));
+            addAttr(attrs, "majorUnit", firstChildVal(axis, "majorUnit"));
+            addAttr(attrs, "minorUnit", firstChildVal(axis, "minorUnit"));
+            if (const XmlNode* numFmt = firstChildLocal(*axis, "numFmt")) {
+                addAttr(attrs, "numberFormat", attrLocal(*numFmt, "formatCode"));
+                addAttr(attrs, "sourceLinked", attrLocal(*numFmt, "sourceLinked"));
+            }
+            if (firstChildLocal(*axis, "majorGridlines")) {
+                addAttr(attrs, "majorGridlines", "true");
+            }
+            if (firstChildLocal(*axis, "minorGridlines")) {
+                addAttr(attrs, "minorGridlines", "true");
+            }
+            md.empty("chart_axis", attrs);
+        }
+    }
+}
+
+void emitChartDataLabels(const XmlNode& root, MarkdownWriter& md)
+{
+    for (const XmlNode* labels : descendantsLocal(root, "dLbls")) {
+        Attrs attrs = tagAttrs("chart_data_labels");
+        const XmlNode* series = ancestorLocal(*labels, "ser");
+        addAttr(attrs, "scope", series ? "series" : "chart");
+        if (series) {
+            addAttr(attrs, "seriesIndex", firstChildVal(series, "idx"));
+        }
+        addAttr(attrs, "position", firstChildVal(labels, "dLblPos"));
+        addAttr(attrs, "showLegendKey", onOffAttr(labels, "showLegendKey"));
+        addAttr(attrs, "showValue", onOffAttr(labels, "showVal"));
+        addAttr(attrs, "showCategoryName", onOffAttr(labels, "showCatName"));
+        addAttr(attrs, "showSeriesName", onOffAttr(labels, "showSerName"));
+        addAttr(attrs, "showPercent", onOffAttr(labels, "showPercent"));
+        addAttr(attrs, "showBubbleSize", onOffAttr(labels, "showBubbleSize"));
+        addAttr(attrs, "showLeaderLines", onOffAttr(labels, "showLeaderLines"));
+        if (const XmlNode* separator = firstChildLocal(*labels, "separator")) {
+            addAttr(attrs, "separator", separator->text);
+        }
+        if (const XmlNode* numFmt = firstChildLocal(*labels, "numFmt")) {
+            addAttr(attrs, "numberFormat", attrLocal(*numFmt, "formatCode"));
+            addAttr(attrs, "sourceLinked", attrLocal(*numFmt, "sourceLinked"));
+        }
+        md.empty("chart_data_labels", attrs);
+    }
+}
+
+void emitChartSources(const Package& package, const std::string& chartPart, const XmlNode& chartRoot, MarkdownWriter& md)
+{
+    RelationshipMap chartRels = loadRelationships(package, chartPart);
+    std::set<std::string> emitted;
+    for (const XmlNode* externalData : descendantsLocal(chartRoot, "externalData")) {
+        std::string id = relationshipIdAttr(*externalData);
+        std::string target = relationshipTarget(chartRels, id, chartPart);
+        if (target.empty() && !id.empty()) {
+            target = id;
+        }
+        if (!emitted.insert(id + "|" + target).second) {
+            continue;
+        }
+
+        Attrs attrs = tagAttrs("chart_source");
+        addAttr(attrs, "relationshipId", id);
+        addAttr(attrs, "target", target);
+
+        auto relIt = chartRels.find(id);
+        if (relIt != chartRels.end()) {
+            addAttr(attrs, "relationshipType", relIt->second.type);
+            addAttr(attrs, "targetMode", relIt->second.mode);
+        }
+
+        bool embeddedXlsx = !target.empty() && !isExternalTarget(target) && package.exists(target) && lower(fs::path(target).extension().string()) == ".xlsx";
+        if (embeddedXlsx) {
+            addAttr(attrs, "type", "embedded_xlsx");
+            md.open("chart_source", attrs);
+            try {
+                Package embedded(package.entryPath(target));
+                emitEmbeddedXlsxTables(embedded, md, "chart_data");
+            } catch (const std::exception& ex) {
+                Attrs errorAttrs = tagAttrs("chart_source_error");
+                addAttr(errorAttrs, "message", ex.what());
+                md.empty("chart_source_error", errorAttrs);
+            }
+            md.close("chart_source");
+        } else {
+            addAttr(attrs, "type", isExternalTarget(target) ? "external" : "package_part");
+            md.empty("chart_source", attrs);
+        }
+    }
+}
+
 void emitChartRef(const Package& package, const XmlNode& chart, MarkdownWriter& md, const RelationshipMap& rels, const std::string& part)
 {
     std::string id = relationshipIdAttr(chart);
@@ -1714,6 +2103,7 @@ void emitChartRef(const Package& package, const XmlNode& chart, MarkdownWriter& 
     Attrs attrs = tagAttrs("chart");
     addAttr(attrs, "relationshipId", id);
     addAttr(attrs, "target", target);
+    addChartFrameAttrs(attrs, chart);
 
     if (target.empty() || isExternalTarget(target) || !package.exists(target)) {
         md.empty("chart", attrs);
@@ -1726,12 +2116,18 @@ void emitChartRef(const Package& package, const XmlNode& chart, MarkdownWriter& 
     addAttr(attrs, "title", chartTitle(*doc));
     md.open("chart", attrs);
 
+    emitChartSources(package, target, *doc, md);
+    emitChartLegend(*doc, md);
+    emitChartAxes(*doc, md);
+    emitChartDataLabels(*doc, md);
+
     for (const XmlNode* series : descendantsLocal(*doc, "ser")) {
         Attrs seriesAttrs = tagAttrs("chart_series");
         if (const XmlNode* idx = firstChildLocal(*series, "idx")) {
             addAttr(seriesAttrs, "index", attrLocal(*idx, "val"));
         }
         addAttr(seriesAttrs, "name", chartSeriesName(*series));
+        addChartStyleAttrs(seriesAttrs, chartStyleFromSpPr(firstChildLocal(*series, "spPr")));
         if (const XmlNode* tx = firstChildLocal(*series, "tx")) {
             addAttr(seriesAttrs, "nameRef", firstFormulaRef(*tx));
         }
@@ -1743,7 +2139,35 @@ void emitChartRef(const Package& package, const XmlNode& chart, MarkdownWriter& 
             addAttr(seriesAttrs, "valuesRef", firstFormulaRef(*val));
             addAttr(seriesAttrs, "valueCount", std::to_string(descendantsLocal(*val, "pt").size()));
         }
-        md.empty("chart_series", seriesAttrs);
+        std::vector<std::pair<std::string, std::string>> categories = cachedPointValues(firstChildLocal(*series, "cat"));
+        std::vector<std::pair<std::string, std::string>> values = cachedPointValues(firstChildLocal(*series, "val"));
+        std::map<std::string, ChartStyle> pointStyles = chartPointStyles(*series);
+        size_t pointCount = std::max(categories.size(), values.size());
+        if (pointCount == 0) {
+            md.empty("chart_series", seriesAttrs);
+            continue;
+        }
+        md.open("chart_series", seriesAttrs);
+        for (size_t i = 0; i < pointCount; ++i) {
+            Attrs pointAttrs = tagAttrs("chart_point");
+            std::string index = i < values.size() && !values[i].first.empty() ? values[i].first : std::to_string(i);
+            if (i < categories.size() && !categories[i].first.empty()) {
+                index = categories[i].first;
+            }
+            addAttr(pointAttrs, "index", index);
+            if (i < categories.size()) {
+                addAttr(pointAttrs, "category", categories[i].second);
+            }
+            if (i < values.size()) {
+                addAttr(pointAttrs, "value", values[i].second);
+            }
+            auto styleIt = pointStyles.find(index);
+            if (styleIt != pointStyles.end()) {
+                addChartStyleAttrs(pointAttrs, styleIt->second);
+            }
+            md.empty("chart_point", pointAttrs);
+        }
+        md.close("chart_series");
     }
 
     md.close("chart");
@@ -1818,7 +2242,9 @@ void parseWorksheet(const Package& package,
                     const std::string& name,
                     MarkdownWriter& md,
                     const std::vector<std::string>& shared,
-                    const std::vector<CellFormat>& formats)
+                    const std::vector<CellFormat>& formats,
+                    bool emitDrawings = true,
+                    const std::string& tableRole = {})
 {
     XmlParser parser;
     auto doc = parser.parse(package.readEntry(part));
@@ -1841,6 +2267,7 @@ void parseWorksheet(const Package& package,
     Attrs tableAttrs = tagAttrs("table");
     addAttr(tableAttrs, "sheet", name);
     addAttr(tableAttrs, "part", part);
+    addAttr(tableAttrs, "role", tableRole);
     md.open("table", tableAttrs);
 
     for (const XmlNode* row : descendantsLocal(*doc, "row")) {
@@ -1901,11 +2328,35 @@ void parseWorksheet(const Package& package,
     }
     md.close("table");
 
-    for (const XmlNode* drawing : descendantsLocal(*doc, "drawing")) {
-        std::string id = relationshipIdAttr(*drawing);
-        std::string target = relationshipTarget(rels, id, part);
-        if (!target.empty()) {
-            emitOoxDrawingPart(package, target, md, {});
+    if (emitDrawings) {
+        for (const XmlNode* drawing : descendantsLocal(*doc, "drawing")) {
+            std::string id = relationshipIdAttr(*drawing);
+            std::string target = relationshipTarget(rels, id, part);
+            if (!target.empty()) {
+                emitOoxDrawingPart(package, target, md, {});
+            }
+        }
+    }
+}
+
+void emitEmbeddedXlsxTables(const Package& package, MarkdownWriter& md, const std::string& tableRole)
+{
+    std::vector<CellFormat> formats = loadXlsxFormats(package);
+    std::vector<std::string> shared = loadSharedStrings(package);
+    RelationshipMap workbookRels = loadRelationships(package, "xl/workbook.xml");
+
+    if (!package.exists("xl/workbook.xml")) {
+        return;
+    }
+
+    XmlParser parser;
+    auto doc = parser.parse(package.readEntry("xl/workbook.xml"));
+    for (const XmlNode* sheet : descendantsLocal(*doc, "sheet")) {
+        std::string sheetName = attrLocal(*sheet, "name");
+        std::string id = relationshipIdAttr(*sheet);
+        std::string target = relationshipTarget(workbookRels, id, "xl/workbook.xml");
+        if (!target.empty() && package.exists(target)) {
+            parseWorksheet(package, target, sheetName, md, shared, formats, false, tableRole);
         }
     }
 }
